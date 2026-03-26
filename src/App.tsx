@@ -76,13 +76,13 @@ const translations = {
     source: 'Źródło:',
     notes: 'Uwagi',
     assumptions: 'Założenia zastosowane w aplikacji',
-    note1: '• Aplikacja korzysta z kursów referencyjnych EBC udostępnianych przez Frankfurter API.',
+    note1: '• Aplikacja korzysta z oficjalnego API EBC dla dataflow EXR.',
     note2: '• Kursy EBC są notowane względem EUR, więc każde przeliczenie przebiega przez EUR.',
     note3: '• Gdy dla wybranego dnia nie ma publikacji, używany jest ostatni wcześniejszy dostępny kurs.',
     note4: '• Zakres pobrania obejmuje ostatnie maks. 120 dni do wybranej daty.',
     note5: '• Automatyczne odświeżanie działa codziennie o 16:30 CET dla bieżącej daty, gdy strona jest otwarta.',
     note6: '• Wzór: netto w EUR = netto w walucie dokumentu ÷ kurs waluty dokumentu; netto w walucie domowej = netto w EUR × kurs waluty domowej; VAT = netto w walucie domowej × stawka VAT; kurs w polu VAT_Kurs = liczba jednostek waluty domowej za 1 jednostkę waluty dokumentu.',
-    sourceValue: 'Frankfurter API (kursy referencyjne EBC)',
+    sourceValue: 'oficjalne API EBC (EXR / csvdata)',
     futureDate: 'Wybrana data pochodzi z przyszłości',
     invalidNetAmount: 'Podaj poprawną kwotę netto większą od zera.',
     invalidVatRate: 'Podaj poprawną stawkę VAT.',
@@ -92,6 +92,8 @@ const translations = {
       `Waluta ${currency} nie jest dostępna dla dnia ${date}.`,
     noDataInRange: 'Brak danych kursowych dla wskazanego zakresu.',
     fetchFailed: 'Nie udało się pobrać kursów.',
+    emptyEcbResponse: 'Brak danych kursowych w odpowiedzi EBC.',
+    invalidEcbCsv: 'Nieoczekiwany format CSV z EBC.',
     httpError: (status: number) => `Błąd HTTP ${status}`,
     testsFailed: 'Niepowodzenie testów kalkulatora VAT:',
     languagePL: 'Polski',
@@ -123,13 +125,13 @@ const translations = {
     source: 'Source:',
     notes: 'Notes',
     assumptions: 'Assumptions used in the application',
-    note1: '• The application uses ECB reference rates provided by the Frankfurter API.',
+    note1: '• The application uses the official ECB API for the EXR dataflow.',
     note2: '• ECB rates are quoted against EUR, so every conversion goes through EUR.',
     note3: '• If no rate is published for the selected day, the latest earlier available rate is used.',
     note4: '• The downloaded range covers up to the last 120 days up to the selected date.',
     note5: '• Automatic refresh runs daily at 16:30 CET for the current date while the page is open.',
     note6: '• Formula: amount in EUR = document net amount ÷ document currency rate; net amount in home currency = amount in EUR × home currency rate; VAT = net amount in home currency × VAT rate; the rate in the VAT_Rate field = number of home currency units for 1 unit of the document currency.',
-    sourceValue: 'Frankfurter API (ECB reference rates)',
+    sourceValue: 'official ECB API (EXR / csvdata)',
     futureDate: 'The selected date is in the future',
     invalidNetAmount: 'Enter a valid net amount greater than zero.',
     invalidVatRate: 'Enter a valid VAT rate.',
@@ -139,6 +141,8 @@ const translations = {
       `Currency ${currency} is not available for ${date}.`,
     noDataInRange: 'No exchange rate data is available for the selected range.',
     fetchFailed: 'Failed to download exchange rates.',
+    emptyEcbResponse: 'No exchange rate data was returned by the ECB.',
+    invalidEcbCsv: 'Unexpected ECB CSV format.',
     httpError: (status: number) => `HTTP error ${status}`,
     testsFailed: 'VAT calculator self-tests failed:',
     languagePL: 'Polski',
@@ -218,6 +222,52 @@ function findClosestRateDate(ratesByDate: RatesByDate, selectedDate: string) {
   }
 
   return candidate;
+}
+
+function parseEcbCsvToRatesByDate(
+  csvText: string,
+  messages: {
+    emptyEcbResponse: string;
+    invalidEcbCsv: string;
+  }
+): RatesByDate {
+  const normalized = csvText.replace(/^\uFEFF/, '').trim();
+  const lines = normalized.split(/\r?\n/).filter(Boolean);
+
+  if (lines.length < 2) {
+    throw new Error(messages.emptyEcbResponse);
+  }
+
+  const header = lines[0].split(',');
+  const idxCurrency = header.indexOf('CURRENCY');
+  const idxTime = header.indexOf('TIME_PERIOD');
+  const idxValue = header.indexOf('OBS_VALUE');
+
+  if (idxCurrency === -1 || idxTime === -1 || idxValue === -1) {
+    throw new Error(messages.invalidEcbCsv);
+  }
+
+  const byDate: RatesByDate = {};
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const row = lines[i].split(',');
+    const currency = row[idxCurrency];
+    const date = row[idxTime];
+    const rawValue = row[idxValue];
+
+    if (!currency || !date || !rawValue) continue;
+
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) continue;
+
+    if (!byDate[date]) {
+      byDate[date] = { EUR: 1 };
+    }
+
+    byDate[date][currency] = value;
+  }
+
+  return byDate;
 }
 
 function calculateVatInHomeCurrency({
@@ -447,14 +497,14 @@ export default function App() {
     window.localStorage.setItem('vat-ebc-language', language);
   }, [language]);
 
-  const fetchRates = async () => {
-    if (isFutureDate(selectedDate)) {
-      setRatesByDate({});
-      setSourceInfo('');
-      setError(t.futureDate);
-      setLoading(false);
-      return;
-    }
+   const fetchRates = async () => {
+      if (isFutureDate(selectedDate)) {
+    setRatesByDate({});
+    setSourceInfo('');
+    setError(t.futureDate);
+    setLoading(false);
+    return;
+  }
 
     setLoading(true);
     setError('');
@@ -465,23 +515,25 @@ export default function App() {
       start.setDate(start.getDate() - 120);
       const startDate = start.toISOString().slice(0, 10);
 
-      const response = await fetch(`https://api.frankfurter.app/${startDate}..${endDate}`);
+      const url =
+        `https://data-api.ecb.europa.eu/service/data/EXR/` +
+        `D..EUR.SP00.A?startPeriod=${startDate}&endPeriod=${endDate}&format=csvdata`;
+
+      const response = await fetch(url);
+
       if (!response.ok) {
         throw new Error(t.httpError(response.status));
-      }
+        }
 
-      const data = (await response.json()) as { rates?: Record<string, Record<string, number>> };
-      if (!data.rates || Object.keys(data.rates).length === 0) {
+      const csvText = await response.text();
+      const nextRatesByDate = parseEcbCsvToRatesByDate(csvText, {
+        emptyEcbResponse: t.emptyEcbResponse,
+        invalidEcbCsv: t.invalidEcbCsv,
+      });
+
+      if (Object.keys(nextRatesByDate).length === 0) {
         throw new Error(t.noDataInRange);
       }
-
-      const nextRatesByDate: RatesByDate = {};
-      Object.entries(data.rates).forEach(([date, dayRates]) => {
-        nextRatesByDate[date] = {
-          EUR: 1,
-          ...dayRates,
-        };
-      });
 
       setRatesByDate(nextRatesByDate);
       setSourceInfo(t.sourceValue);
