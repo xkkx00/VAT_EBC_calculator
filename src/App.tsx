@@ -150,13 +150,20 @@ const translations = {
   },
 } as const;
 
+function roundUp(value: number, decimals: number) {
+  const factor = 10 ** decimals;
+  return Math.ceil((value + Number.EPSILON) * factor) / factor;
+}
+
 function formatNumber(value: number | undefined, currency: string) {
   if (value === undefined || !Number.isFinite(value)) return '—';
+
+  const roundedValue = roundUp(value, 2);
 
   return `${new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(value)} ${currency}`;
+  }).format(roundedValue)} ${currency}`;
 }
 
 function formatRate(value: number | undefined, digits = 6, useGrouping = true) {
@@ -172,11 +179,13 @@ function formatRate(value: number | undefined, digits = 6, useGrouping = true) {
 function formatPlainAmount(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value)) return '—';
 
+  const roundedValue = roundUp(value, 2);
+
   return new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
     useGrouping: false,
-  }).format(value);
+  }).format(roundedValue);
 }
 
 function todayString() {
@@ -321,8 +330,8 @@ function calculateVatInHomeCurrency({
 
   const amountInEur = foreignCurrency === 'EUR' ? amount : amount / foreignRate;
   const netInHome = homeCurrency === 'EUR' ? amountInEur : amountInEur * homeRate;
-  const vatInHome = netInHome * (vat / 100);
-  const grossInHome = netInHome + vatInHome;
+  const vatInHome = roundUp(netInHome * (vat / 100), 2);
+  const grossInHome = roundUp(netInHome + vatInHome, 2);
   const homePerDocumentRate = homeRate / foreignRate;
   const vatAndRateCombined = `${formatPlainAmount(vatInHome)}_${formatRate(homePerDocumentRate, 4, false)}`;
 
